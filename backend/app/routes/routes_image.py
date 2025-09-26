@@ -13,7 +13,7 @@ from io import BytesIO
 import uuid
 import json
 
-async def process_pdf_upload(user_id: str, pdf_id: str, file_content: bytes, pdf_url: str):
+async def process_pdf_upload(user_id: str, pdf_id: str, file_content: bytes, pdf_url: str, original_filename: str):
     """Traitement asynchrone du PDF uploadé"""
     try:
         # Conversion PDF en images
@@ -27,18 +27,19 @@ async def process_pdf_upload(user_id: str, pdf_id: str, file_content: bytes, pdf
             image.save(img_byte_arr, format="PNG", optimize=True, quality=50)
             img_bytes = img_byte_arr.getvalue()
 
-            # Upload image
-            image_filename = f"{pdf_id}_page_{i+1}.png"
+            # Générer le nom de l'image en se basant sur le nom original du PDF
+            original_name = original_filename.rsplit('.', 1)[0]  # Enlever l'extension .pdf
+            page_suffix = f"_page_{i+1}" if len(images) > 1 else ""  # Ajouter le numéro de page seulement s'il y a plusieurs pages
+            image_filename = f"{original_name}{page_suffix}.png"
             img_path = f"images/{user_id}/{image_filename}"
             supabase.storage.from_(BUCKET_NAME).upload(img_path, img_bytes)
             img_url = supabase.storage.from_(BUCKET_NAME).get_public_url(img_path)
 
             # Créer l'enregistrement image
             image_id = str(uuid.uuid4())
-            # CORRECT
             image_data = {
                 "id": image_id,
-                "filename": image_filename,
+                "filename": original_filename,  # Utiliser le nom original du PDF
                 "upload_date": datetime.utcnow().isoformat(),
                 "user_id": user_id,
                 "file_path": img_url,
@@ -92,7 +93,8 @@ async def upload_pdf(
             user_id=user_id,
             pdf_id=pdf_id,
             file_content=content,
-            pdf_url=pdf_url
+            pdf_url=pdf_url,
+            original_filename=file.filename  # Ajouter le nom original du fichier
         )
 
         # Réponse immédiate

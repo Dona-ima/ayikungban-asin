@@ -4,13 +4,15 @@ from app.routes import routes_user
 from app.routes import routes_result
 from app.routes.routes_image import router as image_router
 from app.routes.routes_notification import router as notification_router
+from app.routes import routes_chatbot
+
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="ANDF BJ", version="1.0.0")
 
 app.include_router(routes_auth.router)
 app.include_router(routes_user.router)
-#app.include_router(routes_admin.router)
+app.include_router(routes_chatbot.router, prefix="/api", tags=["Chatbot"])
 app.include_router(image_router)
 app.include_router(routes_result.router)
 app.include_router(notification_router)

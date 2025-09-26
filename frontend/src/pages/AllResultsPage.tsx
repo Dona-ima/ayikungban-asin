@@ -50,11 +50,8 @@ const ResultItem: React.FC<ResultItemProps> = ({ result, onViewDetails }) => {
   return (
     <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', borderRadius: 2, boxShadow: '0 1px 4px 0 rgba(0,0,0,0.05)' }}>
       <CardContent>
-        <Typography variant="h6" component="div" sx={{ fontWeight: 'bold', mb: 1 }}>
+        <Typography variant="h6" component="div" sx={{ fontWeight: 'bold', mb: 2 }}>
           {result.filename}
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          ID: {result.image_id}
         </Typography>
         <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
           <CalendarTodayIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />

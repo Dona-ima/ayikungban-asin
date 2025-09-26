@@ -6,9 +6,9 @@ import DashboardPage from './pages/DashboardPage';
 import ProfilePage from './pages/ProfilePage';
 import UploadPage from './pages/UploadPage';
 import NotificationsPage from './pages/NotificationsPage';
-import ResultsPage from './pages/ResultsPage';
-import AllResultsPage from './pages/AllResultsPage';
 
+import AllResultsPage from './pages/AllResultsPage';
+import ResultDetailsPage from './pages/ResultDetailsPage';
 
 const App: React.FC = () => {
   return (
@@ -21,7 +21,7 @@ const App: React.FC = () => {
       <Route path="/upload" element={<UploadPage />} />
       <Route path="/notifications" element={<NotificationsPage />} />
       <Route path="/results" element={<AllResultsPage />} />
-      <Route path="/results/:id" element={<ResultsPage />} />
+      <Route path="/results/:id" element={<ResultDetailsPage />} />
       
     </Routes>
   );
