@@ -1,0 +1,420 @@
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional
+import os
+import tempfile
+import shutil
+from pathlib import Path
+import logging
+import uvicorn
+from datetime import datetime
+
+# Importer notre classe Qdrant Embedded
+from qdrant_embedded_vectorstore import QdrantEmbeddedVectorStore
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Modèles Pydantic pour les requêtes/réponses
+class SearchRequest(BaseModel):
+    query: str = Field(..., description="Texte de la requête de recherche")
+    k: int = Field(default=5, ge=1, le=50, description="Nombre de résultats à retourner")
+    filter_conditions: Optional[Dict[str, Any]] = Field(default=None, description="Conditions de filtrage")
+
+class SearchResult(BaseModel):
+    id: str
+    text: str
+    metadata: Dict[str, Any]
+    score: float
+
+class SearchResponse(BaseModel):
+    results: List[SearchResult]
+    query: str
+    total_results: int
+    processing_time: float
+
+class DocumentUploadResponse(BaseModel):
+    success: bool
+    message: str
+    document_ids: List[str]
+    total_chunks: int
+
+class CollectionInfo(BaseModel):
+    name: str
+    vector_size: int
+    vectors_count: int
+    points_count: int
+    status: str
+    db_path: str
+
+class DeleteRequest(BaseModel):
+    ids: List[str] = Field(..., description="Liste des IDs à supprimer")
+
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    database_path: str
+    collections: List[str]
+
+# Initialisation FastAPI
+app = FastAPI(
+    title="Qdrant Embedded Vector Store API",
+    description="API pour interagir avec une base de données vectorielle Qdrant embedded",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Configuration CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En production, spécifiez les domaines autorisés
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Variables globales
+vectorstore: Optional[QdrantEmbeddedVectorStore] = None
+DB_PATH = os.getenv("QDRANT_DB_PATH", "./qdrant_embedded_db")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "documents")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialiser la base de données au démarrage"""
+    global vectorstore
+    try:
+        logger.info("🚀 Initialisation de Qdrant Embedded...")
+        vectorstore = QdrantEmbeddedVectorStore(
+            collection_name=COLLECTION_NAME,
+            db_path=DB_PATH,
+            embedding_model=EMBEDDING_MODEL
+        )
+        logger.info("✅ Qdrant Embedded initialisé avec succès!")
+    except Exception as e:
+        logger.error(f"❌ Erreur lors de l'initialisation: {e}")
+        raise
+
+@app.get("/", response_model=HealthResponse)
+async def root():
+    """Point d'entrée de l'API"""
+    try:
+        info = vectorstore.get_collection_info()
+        return HealthResponse(
+            status="healthy",
+            timestamp=datetime.now().isoformat(),
+            database_path=DB_PATH,
+            collections=[COLLECTION_NAME]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Vérification de l'état de l'API"""
+    return await root()
+
+@app.post("/search", response_model=SearchResponse)
+async def search_documents(request: SearchRequest):
+    """
+    Recherche de documents par similarité sémantique
+    """
+    try:
+        start_time = datetime.now()
+        
+        # Effectuer la recherche
+        results = vectorstore.similarity_search(
+            query=request.query,
+            k=request.k,
+            filter_conditions=request.filter_conditions
+        )
+        
+        # Calculer le temps de traitement
+        processing_time = (datetime.now() - start_time).total_seconds()
+        
+        # Formater la réponse
+        search_results = [
+            SearchResult(
+                id=result["id"],
+                text=result["text"],
+                metadata=result["metadata"],
+                score=result["score"]
+            )
+            for result in results
+        ]
+        
+        return SearchResponse(
+            results=search_results,
+            query=request.query,
+            total_results=len(search_results),
+            processing_time=processing_time
+        )
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la recherche: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la recherche: {str(e)}")
+
+@app.post("/upload", response_model=DocumentUploadResponse)
+async def upload_documents(
+    files: List[UploadFile] = File(...),
+    chunk_size: int = Form(default=1000),
+    chunk_overlap: int = Form(default=200),
+    metadata: Optional[str] = Form(default=None)
+):
+    """
+    Upload et indexation de documents
+    """
+    try:
+        if not files:
+            raise HTTPException(status_code=400, detail="Aucun fichier fourni")
+        
+        temp_dir = tempfile.mkdtemp()
+        file_paths = []
+        additional_metadata = []
+        
+        try:
+            # Sauvegarder les fichiers temporairement
+            for i, file in enumerate(files):
+                if file.filename:
+                    file_path = os.path.join(temp_dir, file.filename)
+                    with open(file_path, "wb") as buffer:
+                        content = await file.read()
+                        buffer.write(content)
+                    file_paths.append(file_path)
+                    
+                    # Métadonnées de base
+                    file_metadata = {
+                        "upload_timestamp": datetime.now().isoformat(),
+                        "original_filename": file.filename,
+                        "file_size": len(content)
+                    }
+                    
+                    # Ajouter métadonnées personnalisées si fournies
+                    if metadata:
+                        try:
+                            import json
+                            custom_metadata = json.loads(metadata)
+                            if isinstance(custom_metadata, list) and i < len(custom_metadata):
+                                file_metadata.update(custom_metadata[i])
+                            elif isinstance(custom_metadata, dict):
+                                file_metadata.update(custom_metadata)
+                        except json.JSONDecodeError:
+                            logger.warning("Métadonnées JSON invalides, ignorées")
+                    
+                    additional_metadata.append(file_metadata)
+            
+            # Indexer les documents
+            document_ids = vectorstore.add_documents(
+                file_paths=file_paths,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                additional_metadata=additional_metadata
+            )
+            
+            return DocumentUploadResponse(
+                success=True,
+                message=f"{len(files)} fichier(s) uploadé(s) et indexé(s) avec succès",
+                document_ids=document_ids,
+                total_chunks=len(document_ids)
+            )
+            
+        finally:
+            # Nettoyer les fichiers temporaires
+            shutil.rmtree(temp_dir)
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de l'upload: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload: {str(e)}")
+
+@app.delete("/documents", response_model=Dict[str, Any])
+async def delete_documents(request: DeleteRequest):
+    """
+    Suppression de documents par IDs
+    """
+    try:
+        success = vectorstore.delete_documents(request.ids)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"{len(request.ids)} document(s) supprimé(s)",
+                "deleted_ids": request.ids
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Erreur lors de la suppression")
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de la suppression: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
+
+@app.get("/collection/info", response_model=CollectionInfo)
+async def get_collection_info():
+    """
+    Informations sur la collection
+    """
+    try:
+        info = vectorstore.get_collection_info()
+        return CollectionInfo(**info)
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des infos: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+
+@app.post("/collection/backup")
+async def backup_collection(backup_name: str = Query(..., description="Nom de la sauvegarde")):
+    """
+    Créer une sauvegarde de la collection
+    """
+    try:
+        backup_path = f"./backups/{backup_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        success = vectorstore.backup_database(backup_path)
+        
+        if success:
+            return {
+                "success": True,
+                "message": "Sauvegarde créée avec succès",
+                "backup_path": backup_path
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Erreur lors de la sauvegarde")
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de la sauvegarde: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+
+@app.get("/search/similar/{document_id}")
+async def find_similar_documents(
+    document_id: str,
+    k: int = Query(default=5, ge=1, le=50),
+    include_original: bool = Query(default=False)
+):
+    """
+    Trouver des documents similaires à un document existant
+    """
+    try:
+        # Récupérer le document original
+        search_results = vectorstore.client.retrieve(
+            collection_name=vectorstore.collection_name,
+            ids=[document_id],
+            with_payload=True,
+            with_vectors=True
+        )
+        
+        if not search_results:
+            raise HTTPException(status_code=404, detail="Document non trouvé")
+        
+        original_doc = search_results[0]
+        
+        # Rechercher des documents similaires
+        similar_results = vectorstore.client.search(
+            collection_name=vectorstore.collection_name,
+            query_vector=original_doc.vector,
+            limit=k + 1 if not include_original else k,
+            with_payload=True,
+            with_vectors=False
+        )
+        
+        # Filtrer le document original si nécessaire
+        if not include_original:
+            similar_results = [r for r in similar_results if r.id != document_id][:k]
+        
+        # Formater les résultats
+        results = [
+            {
+                "id": result.id,
+                "text": result.payload.get("text", ""),
+                "metadata": {k: v for k, v in result.payload.items() if k != "text"},
+                "score": result.score
+            }
+            for result in similar_results
+        ]
+        
+        return {
+            "original_document_id": document_id,
+            "similar_documents": results,
+            "total_results": len(results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la recherche de similaires: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+
+@app.get("/documents/by-filter")
+async def get_documents_by_filter(
+    filename: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    file_extension: Optional[str] = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=100)
+):
+    """
+    Récupérer des documents selon des critères de filtrage
+    """
+    try:
+        # Construire les conditions de filtre
+        filter_conditions = {}
+        if filename:
+            filter_conditions["filename"] = filename
+        if category:
+            filter_conditions["category"] = category
+        if file_extension:
+            filter_conditions["file_extension"] = file_extension
+        
+        if not filter_conditions:
+            raise HTTPException(status_code=400, detail="Au moins un critère de filtre requis")
+        
+        # Effectuer une recherche avec filtre (en utilisant un vecteur neutre)
+        import numpy as np
+        neutral_vector = np.zeros(vectorstore.vector_size).tolist()
+        
+        from qdrant_client.http import models
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key=key,
+                    match=models.MatchValue(value=value)
+                )
+                for key, value in filter_conditions.items()
+            ]
+        )
+        
+        results = vectorstore.client.search(
+            collection_name=vectorstore.collection_name,
+            query_vector=neutral_vector,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+            with_vectors=False
+        )
+        
+        # Formater les résultats
+        formatted_results = [
+            {
+                "id": result.id,
+                "text": result.payload.get("text", "")[:200] + "...",
+                "metadata": {k: v for k, v in result.payload.items() if k != "text"}
+            }
+            for result in results
+        ]
+        
+        return {
+            "filter_conditions": filter_conditions,
+            "documents": formatted_results,
+            "total_results": len(formatted_results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du filtrage: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+
+if __name__ == "__main__":
+    # Configuration pour le développement
+    uvicorn.run(
+        "main:app",  # Remplacez "main" par le nom de votre fichier
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
